@@ -1,5 +1,6 @@
 """Эндпоинты AI: настройки, чат, распознавание документов."""
 import json
+import logging
 import os
 import re
 import urllib.error
@@ -11,6 +12,9 @@ from fastapi import APIRouter, Query, HTTPException
 
 from api.database.connection import get_cursor, SCHEMA
 from api.utils.formatters import mask_key
+
+logger = logging.getLogger("ai_routes")
+logging.basicConfig(level=logging.INFO)
 
 router = APIRouter(tags=["ai"])
 
@@ -52,6 +56,22 @@ DEFAULT_SYSTEM = (
     "Форматируй суммы в рублях (₽). "
     "Используй markdown для выделения важных данных — **жирный** для ключевых цифр."
 )
+
+# Vision prompt для распознавания чеков/накладных через GPT-4o-mini
+VISION_PROMPT = """Ты финансовый ИИ-бухгалтер для ИП России. Тебе дано фото финансового документа.
+Твоя задача — извлечь данные и вернуть ТОЛЬКО JSON без лишнего текста.
+
+ПРАВИЛА:
+- amount: итоговая сумма (число, например 13556.93). Ищи "ИТОГО", "Всего к оплате", "Сумма". Если сумма прописью — расшифруй.
+- date: дата в формате YYYY-MM-DD
+- category: определи по содержимому — "Закупка товара", "ГСМ", "Аренда", "Бухгалтерские услуги", "Маркетинг", "Логистика", "Зарплаты", "Связь", "Коммунальные услуги", "Продукты", "Прочее"
+- doc_type: "Чек", "Накладная", "Счёт-фактура", "Акт"
+- counterparty: название продавца/контрагента
+- inn: ИНН (если видно)
+- comment: краткое описание
+
+Верни JSON:
+{"amount":30039.26,"date":"2025-10-20","category":"Закупка товара","doc_type":"Накладная","counterparty":"ИП Иванов","inn":"1234567890","comment":"52 позиции, итого 30 039 руб"}"""
 
 
 def test_proxyapi(model: str, proxyapi_key: str) -> dict:
@@ -163,11 +183,12 @@ def _get_ai_settings(cur):
         "temperature": float(row[6] or 0.3),
         "system_prompt": row[7] or "",
         "proxyapi_key": (row[8] or os.environ.get("PROXYAPI_KEY", "")),
-        "vision_provider": row[9] or "proxyapi-gpt-4o",
+        "vision_provider": row[9] or "proxyapi-gpt-4o-mini",
     }
 
 
 def call_deepseek(model, messages, api_key, system_prompt, max_tokens, temperature):
+    logger.info(f"🤖 call_deepseek: model={model}, key_len={len(api_key) if api_key else 0}")
     payload = {"model": model, "messages": [{"role": "system", "content": system_prompt}] + messages, "max_tokens": max_tokens, "temperature": temperature, "stream": False}
     req = urllib.request.Request("https://api.deepseek.com/v1/chat/completions", data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}, method="POST")
     with urllib.request.urlopen(req, timeout=30) as r:
@@ -201,6 +222,85 @@ def call_yandexgpt(messages, api_key, folder_id, system_prompt, max_tokens, temp
     return result["result"]["alternatives"][0]["message"]["text"]
 
 
+def _call_proxyapi_vision(image_b64: str, proxyapi_key: str, model_name: str = "proxyapi-gpt-4o-mini") -> dict:
+    """Отправляет изображение в ProxyAPI (GPT-4o-mini Vision) и возвращает распознанный JSON."""
+    logger.info(f"👁️ _call_proxyapi_vision: model={model_name}, key_len={len(proxyapi_key) if proxyapi_key else 0}, image_len={len(image_b64)}")
+
+    if not proxyapi_key:
+        logger.error("❌ _call_proxyapi_vision: PROXYAPI_KEY не задан")
+        return {"error": "PROXYAPI_KEY не настроен. Добавьте ключ в разделе МОЗГ → Настройки ИИ."}
+
+    url = PROXYAPI_ENDPOINTS.get(model_name, f"{PROXYAPI_BASE}/openai/v1/chat/completions")
+    real_model = PROXYAPI_MODEL_NAMES.get(model_name, "gpt-4o-mini")
+
+    # Формируем vision-запрос: текст + изображение
+    content = [
+        {"type": "text", "text": VISION_PROMPT},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+    ]
+
+    payload = {
+        "model": real_model,
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": 1024,
+        "temperature": 0.1,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {proxyapi_key}",
+    }
+
+    logger.info(f"👁️ Отправка в ProxyAPI: url={url}, model={real_model}")
+
+    try:
+        req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=45) as r:
+            response = json.loads(r.read().decode("utf-8"))
+        logger.info(f"👁️ ProxyAPI ответ получен, статус: {r.status}")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        logger.error(f"❌ ProxyAPI HTTP {e.code}: {body[:500]}")
+        return {"error": f"ProxyAPI HTTP {e.code}: {body[:300]}"}
+    except Exception as e:
+        logger.error(f"❌ ProxyAPI ошибка соединения: {e}")
+        return {"error": f"Ошибка соединения с ProxyAPI: {str(e)}"}
+
+    # Извлекаем ответ
+    try:
+        if "choices" in response and len(response["choices"]) > 0:
+            reply = response["choices"][0]["message"]["content"]
+        elif "content" in response:
+            reply = response["content"][0]["text"]
+        else:
+            logger.error(f"❌ Неожиданный формат ответа ProxyAPI: {json.dumps(response)[:500]}")
+            return {"error": "Неожиданный формат ответа от AI", "raw": json.dumps(response)[:500]}
+
+        logger.info(f"👁️ Ответ AI: {reply[:300]}")
+
+        # Парсим JSON из ответа
+        text = reply.strip()
+        # Убираем markdown-кодовые блоки если есть
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+
+        # Ищем JSON в ответе
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end])
+            except json.JSONDecodeError:
+                pass
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning(f"⚠️ Не удалось распарсить JSON из ответа: {text[:300]}")
+            return {"error": "AI вернул невалидный JSON", "raw": reply[:500]}
+    except Exception as e:
+        logger.error(f"❌ Ошибка парсинга ответа AI: {e}")
+        return {"error": f"Ошибка парсинга ответа: {str(e)}"}
+
+
 # ── AI Settings ─────────────────────────────────────────────────
 
 @router.get("/api/ai-settings")
@@ -217,7 +317,7 @@ async def ai_settings_get(action: Optional[str] = Query(None)):
             yandex_key = row[3] or os.environ.get("YANDEX_API_KEY", "")
             yandex_folder = row[4] or os.environ.get("YANDEX_FOLDER_ID", "")
             proxyapi_key = row[5] or os.environ.get("PROXYAPI_KEY", "")
-            vision_provider = row[6] or "proxyapi-gpt-4o"
+            vision_provider = row[6] or "proxyapi-gpt-4o-mini"
             if model.startswith("proxyapi-"):
                 ai_result = test_proxyapi(model, proxyapi_key)
             elif model.startswith("gemini"):
@@ -242,7 +342,7 @@ async def ai_settings_get(action: Optional[str] = Query(None)):
         yandex_key = row[7] or os.environ.get("YANDEX_API_KEY", "")
         yandex_folder = row[8] or os.environ.get("YANDEX_FOLDER_ID", "")
         proxyapi_key = row[9] or os.environ.get("PROXYAPI_KEY", "")
-        vision_provider = row[10] or "proxyapi-gpt-4o"
+        vision_provider = row[10] or "proxyapi-gpt-4o-mini"
         return {"settings": {"selected_model": row[0], "max_tokens": row[1], "temperature": float(row[2]), "system_prompt": row[3], "api_key_set": bool(row[4] or os.environ.get("DEEPSEEK_API_KEY")), "api_key_masked": mask_key(row[4] or os.environ.get("DEEPSEEK_API_KEY", "")), "gemini_key_set": bool(gemini_key), "gemini_key_masked": mask_key(gemini_key), "yandex_key_set": bool(yandex_key), "yandex_key_masked": mask_key(yandex_key), "yandex_folder_set": bool(yandex_folder), "yandex_folder_masked": mask_key(yandex_folder), "proxyapi_key_set": bool(proxyapi_key), "proxyapi_key_masked": mask_key(proxyapi_key), "vision_provider": vision_provider, "updated_at": str(row[5])}}
 
 
@@ -275,7 +375,7 @@ async def ai_settings_update(data: dict):
         yandex_key = row[6] or os.environ.get("YANDEX_API_KEY", "")
         yandex_folder = row[7] or os.environ.get("YANDEX_FOLDER_ID", "")
         proxyapi_key = row[8] or ""
-        vision_provider = row[9] or "proxyapi-gpt-4o"
+        vision_provider = row[9] or "proxyapi-gpt-4o-mini"
         return {"settings": {"selected_model": row[0], "max_tokens": row[1], "temperature": float(row[2]), "system_prompt": row[3], "api_key_set": bool(row[4] or os.environ.get("DEEPSEEK_API_KEY")), "api_key_masked": mask_key(row[4] or os.environ.get("DEEPSEEK_API_KEY", "")), "gemini_key_set": bool(gemini_key), "gemini_key_masked": mask_key(gemini_key), "yandex_key_set": bool(yandex_key), "yandex_key_masked": mask_key(yandex_key), "yandex_folder_set": bool(yandex_folder), "yandex_folder_masked": mask_key(yandex_folder), "proxyapi_key_set": bool(proxyapi_key), "proxyapi_key_masked": mask_key(proxyapi_key), "vision_provider": vision_provider}}
 
 
@@ -285,18 +385,22 @@ async def ai_settings_update(data: dict):
 async def ai_chat(data: dict):
     messages = data.get("messages", [])
     requested_model = data.get("model")
+    logger.info(f"💬 ai_chat: model={requested_model}, messages_count={len(messages)}")
     with get_cursor() as cur:
         settings = _get_ai_settings(cur)
     if not settings:
+        logger.error("❌ ai_chat: настройки ИИ не найдены")
         raise HTTPException(500, "Настройки ИИ не найдены.")
     model = requested_model or settings["selected_model"]
     system_prompt = settings["system_prompt"] or DEFAULT_SYSTEM
     max_tokens = settings["max_tokens"]
     temperature = settings["temperature"]
+    logger.info(f"💬 ai_chat: используем модель {model}, deepseek_key={bool(settings['deepseek_key'])}, proxyapi_key={bool(settings['proxyapi_key'])}")
     try:
         if model.startswith("deepseek"):
             if not settings["deepseek_key"]:
-                raise HTTPException(400, "Ключ DeepSeek не задан.")
+                logger.error("❌ ai_chat: DEEPSEEK_API_KEY не задан")
+                raise HTTPException(400, "Ключ DeepSeek не задан. Добавьте DEEPSEEK_API_KEY в настройки.")
             reply = call_deepseek(model, messages, settings["deepseek_key"], system_prompt, max_tokens, temperature)
         elif model.startswith("gemini"):
             if not settings["gemini_key"]:
@@ -307,12 +411,15 @@ async def ai_chat(data: dict):
                 raise HTTPException(400, "Не задан ключ или Folder ID Яндекс.")
             reply = call_yandexgpt(messages, settings["yandex_key"], settings["yandex_folder"], system_prompt, max_tokens, temperature)
         else:
+            logger.error(f"❌ ai_chat: неизвестная модель {model}")
             raise HTTPException(400, f"Модель {model} не поддерживается")
         return {"reply": reply, "model": model}
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
+        logger.error(f"❌ ai_chat HTTP {e.code}: {err_body[:300]}")
         raise HTTPException(e.code, {"error": f"API ошибка {e.code}", "detail": err_body[:500]})
     except Exception as e:
+        logger.error(f"❌ ai_chat исключение: {e}")
         raise HTTPException(500, str(e))
 
 
@@ -348,22 +455,124 @@ def _find_amount(text: str):
 
 @router.post("/api/recognize-doc")
 async def recognize_doc(data: dict):
+    """
+    Распознавание документа.
+    Принимает image_b64 (base64-фото) и/или ocr_text.
+    Отправляет фото в ProxyAPI (GPT-4o-mini Vision) для распознавания.
+    """
+    logger.info(f"🔍 recognize-doc: входные ключи={list(data.keys())}")
+
     ocr_text = data.get("ocr_text", "")
+    image_b64 = data.get("image_b64", "")
     doc_id = data.get("doc_id")
     auto_create_tx = data.get("auto_create_tx", False)
-    amount = _find_amount(ocr_text)
-    category = _apply_category_rules(ocr_text)
+
+    logger.info(f"🔍 doc_id={doc_id}, ocr_len={len(ocr_text)}, img_len={len(image_b64)}, auto_create_tx={auto_create_tx}")
+
+    # Получаем настройки ИИ для ProxyAPI ключа
+    with get_cursor() as cur:
+        settings = _get_ai_settings(cur)
+
+    if not settings:
+        logger.error("❌ recognize-doc: настройки ИИ не найдены")
+        return {"amount": None, "category": "Прочее", "error": "Настройки ИИ не найдены", "fallback": True}
+
+    proxyapi_key = settings.get("proxyapi_key", "")
+    vision_provider = settings.get("vision_provider", "proxyapi-gpt-4o-mini")
+
+    logger.info(f"🔍 vision_provider={vision_provider}, proxyapi_key_set={bool(proxyapi_key)}")
+
+    analysis = {}
+
+    # Если есть изображение — отправляем в ProxyAPI Vision
+    if image_b64 and len(image_b64) > 200:
+        logger.info(f"🔍 Отправляем изображение в ProxyAPI ({len(image_b64)} символов base64)")
+        if not proxyapi_key:
+            logger.error("❌ recognize-doc: PROXYAPI_KEY не задан")
+            # Fallback: пробуем распарсить текстом
+            amount = _find_amount(ocr_text)
+            category = _apply_category_rules(ocr_text)
+            return {"amount": amount, "category": category, "error": "PROXYAPI_KEY не настроен", "fallback": True, "transaction_id": None}
+
+        analysis = _call_proxyapi_vision(image_b64, proxyapi_key, vision_provider)
+    else:
+        logger.info("🔍 Нет изображения, используем текстовый анализ")
+        # Только текст — используем регулярки
+        amount = _find_amount(ocr_text)
+        category = _apply_category_rules(ocr_text)
+        analysis = {"amount": amount, "category": category, "fallback": True}
+        logger.info(f"🔍 Текстовый анализ: amount={amount}, category={category}")
+
+    # Если AI вернул ошибку — fallback
+    if "error" in analysis:
+        logger.warning(f"⚠️ AI вернул ошибку: {analysis['error']}, используем fallback")
+        amount = _find_amount(ocr_text)
+        category = _apply_category_rules(ocr_text)
+        analysis["amount"] = amount
+        analysis["category"] = category
+        analysis["fallback"] = True
+
+    amount = analysis.get("amount")
+    category = analysis.get("category", "Прочее")
+    doc_type = analysis.get("doc_type", "")
+    counterparty = analysis.get("counterparty", "")
+    inn = analysis.get("inn")
+    comment = analysis.get("comment", "")
+
+    if not category or category == "Прочее":
+        category = _apply_category_rules(ocr_text)
+
     tx_id = None
-    if doc_id and amount:
+
+    # Сохраняем результат в БД
+    if doc_id:
+        logger.info(f"💾 Сохраняем результат для документа #{doc_id}: type={doc_type}, amount={amount}, category={category}")
         with get_cursor() as cur:
             try:
-                cur.execute(f"UPDATE {SCHEMA}.documents SET status='done', rec_type=%s, rec_amount=%s, rec_category=%s WHERE id=%s RETURNING id", ("", str(amount), category, doc_id))
-                if cur.fetchone() and auto_create_tx:
+                cur.execute(
+                    f"UPDATE {SCHEMA}.documents SET status='done', rec_type=%s, rec_amount=%s, rec_date=%s, rec_counterparty=%s, rec_inn=%s, rec_category=%s WHERE id=%s RETURNING id",
+                    (doc_type, str(amount) if amount else None, analysis.get("date"), counterparty, inn, category, doc_id),
+                )
+                updated = cur.fetchone()
+                if updated and auto_create_tx and amount:
                     tx_amount = -abs(float(amount))
-                    cur.execute(f"INSERT INTO {SCHEMA}.transactions (date, description, category, amount, status, is_taxable, is_cashless, document_id) VALUES (%s, %s, %s, %s, 'Выполнено', true, false, %s) RETURNING id", (str(date.today()), f"Документ №{doc_id}", category, tx_amount, doc_id))
+                    tx_date = analysis.get("date") or str(date.today())
+                    tx_desc = f"{doc_type or 'Документ'}: {counterparty or ''}".strip(": ")
+                    if not tx_desc or tx_desc == "Документ: ":
+                        tx_desc = comment or f"Расход по документу №{doc_id}"
+                    cur.execute(
+                        f"INSERT INTO {SCHEMA}.transactions (date, description, category, amount, status, is_taxable, is_cashless, document_id) VALUES (%s, %s, %s, %s, 'Выполнено', true, false, %s) RETURNING id",
+                        (tx_date, tx_desc[:255], category, tx_amount, doc_id),
+                    )
                     tx_row = cur.fetchone()
                     if tx_row:
                         tx_id = tx_row[0]
-            except Exception:
-                pass
-    return {"amount": amount, "category": category, "date": str(date.today()), "doc_type": "", "counterparty": "", "inn": None, "comment": "", "fallback": True, "transaction_id": tx_id}
+                        cur.execute(f"UPDATE {SCHEMA}.documents SET transaction_id=%s WHERE id=%s", (tx_id, doc_id))
+                        logger.info(f"💰 Транзакция #{tx_id} создана: {tx_desc} | {tx_amount} ₽ | {category}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка сохранения в БД: {e}")
+
+    # Форматируем сумму для отображения
+    amount_str = None
+    if amount:
+        try:
+            amount_num = float(amount)
+            amount_str = f"₽ {amount_num:,.2f}".replace(",", " ").replace(".", ",")
+        except Exception:
+            amount_str = f"₽ {amount}"
+
+    logger.info(f"✅ recognize-doc результат: amount={amount}, category={category}, tx_id={tx_id}")
+    return {
+        "amount": amount,
+        "amount_str": amount_str,
+        "category": category,
+        "date": analysis.get("date"),
+        "doc_type": doc_type,
+        "counterparty": counterparty,
+        "inn": inn,
+        "comment": comment,
+        "type": analysis.get("type", "expense"),
+        "ocr_text": analysis.get("ocr_text", ocr_text[:2000]),
+        "fallback": analysis.get("fallback", False),
+        "transaction_id": tx_id,
+    }

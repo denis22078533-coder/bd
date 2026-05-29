@@ -234,13 +234,19 @@ export default function Documents() {
       }
       let s3Url: string | undefined;
       if (compressed) {
-        const uploadRes = await api.uploadDoc({ file_b64: compressed.b64, file_name: `scan_${Date.now()}.jpg`, mime_type: "image/jpeg" });
-        if (uploadRes.duplicate) {
-          const dateStr = uploadRes.existing_date ? ` от ${uploadRes.existing_date.slice(0, 10)}` : "";
-          alert(`⚠️ Этот файл уже загружен!\n\nДокумент: «${uploadRes.existing_name}»${dateStr}\n\nДубликат не сохранён.`);
-          return;
+        try {
+          const uploadRes = await api.uploadDoc({ file_b64: compressed.b64, file_name: `scan_${Date.now()}.jpg`, mime_type: "image/jpeg" });
+          if (uploadRes.duplicate) {
+            const dateStr = uploadRes.existing_date ? ` от ${uploadRes.existing_date.slice(0, 10)}` : "";
+            alert(`⚠️ Этот файл уже загружен!\n\nДокумент: «${uploadRes.existing_name}»${dateStr}\n\nДубликат не сохранён.`);
+            return;
+          }
+          s3Url = uploadRes.url;
+        } catch (e) {
+          // Если S3 не настроен или ошибка загрузки — продолжаем без сохранения в облако
+          console.warn("S3 upload failed, proceeding without cloud URL", e);
+          s3Url = undefined;
         }
-        s3Url = uploadRes.url;
       }
       setUploadProgress("Распознаю документ...");
       const res = await api.documents.create({ name: f.name, size_label: `${(f.size / 1024 / 1024).toFixed(1)} МБ`, status: "processing", ...(s3Url ? { s3_url: s3Url } : {}) });
@@ -267,13 +273,18 @@ export default function Documents() {
       const docName = `Накладная (${compressedPages.length} стр.)`;
       let s3Url: string | undefined;
       if (compressedPages[0]?.b64) {
-        const uploadRes = await api.uploadDoc({ file_b64: compressedPages[0].b64, file_name: `scan_${Date.now()}.jpg`, mime_type: "image/jpeg" });
-        if (uploadRes.duplicate) {
-          const dateStr = uploadRes.existing_date ? ` от ${uploadRes.existing_date.slice(0, 10)}` : "";
-          alert(`⚠️ Этот файл уже загружен!\n\nДокумент: «${uploadRes.existing_name}»${dateStr}\n\nДубликат не сохранён.`);
-          return;
+        try {
+          const uploadRes = await api.uploadDoc({ file_b64: compressedPages[0].b64, file_name: `scan_${Date.now()}.jpg`, mime_type: "image/jpeg" });
+          if (uploadRes.duplicate) {
+            const dateStr = uploadRes.existing_date ? ` от ${uploadRes.existing_date.slice(0, 10)}` : "";
+            alert(`⚠️ Этот файл уже загружен!\n\nДокумент: «${uploadRes.existing_name}»${dateStr}\n\nДубликат не сохранён.`);
+            return;
+          }
+          s3Url = uploadRes.url;
+        } catch (e) {
+          console.warn("S3 upload failed (multi-page), proceeding without cloud URL", e);
+          s3Url = undefined;
         }
-        s3Url = uploadRes.url;
       }
       setUploadProgress("Распознаю документ...");
       const res = await api.documents.create({ name: docName, size_label: `${(totalSize / 1024 / 1024).toFixed(1)} МБ`, status: "processing", ...(s3Url ? { s3_url: s3Url } : {}) });

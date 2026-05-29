@@ -504,8 +504,9 @@ async def recognize_doc(data: dict):
         logger.info(f"🔍 Текстовый анализ: amount={amount}, category={category}")
 
     # Если AI вернул ошибку — fallback
-    if "error" in analysis:
-        logger.warning(f"⚠️ AI вернул ошибку: {analysis['error']}, используем fallback")
+    ai_error = analysis.get("error")
+    if ai_error:
+        logger.warning(f"⚠️ AI вернул ошибку: {ai_error}, используем fallback")
         amount = _find_amount(ocr_text)
         category = _apply_category_rules(ocr_text)
         analysis["amount"] = amount
@@ -521,6 +522,26 @@ async def recognize_doc(data: dict):
 
     if not category or category == "Прочее":
         category = _apply_category_rules(ocr_text)
+
+    # Если в итоге нет ни суммы, ни типа — значит AI сломался
+    if not amount and not doc_type:
+        logger.error(f"❌ recognize-doc: ни AI ни fallback не дали данных. ai_error={ai_error}")
+        ai_err_msg = ai_error or "AI не смог прочитать документ / ошибка ProxyAPI"
+        return {
+            "amount": None,
+            "amount_str": None,
+            "category": category,
+            "date": None,
+            "doc_type": "",
+            "counterparty": "",
+            "inn": None,
+            "comment": "",
+            "type": "expense",
+            "ocr_text": ocr_text[:2000] if ocr_text else "",
+            "fallback": True,
+            "transaction_id": None,
+            "error": ai_err_msg,
+        }
 
     tx_id = None
 

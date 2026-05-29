@@ -1,5 +1,5 @@
 """
-Единый бэкенд для Бухгалтер мой / Бабки Скан.
+Единый бэкенд для СканУчёт БДА Групп.
 FastAPI + Vercel Serverless.
 
 Точка входа — подключает модульные роутеры.
@@ -20,7 +20,7 @@ from api.routes.categories import router as categories_router
 from api.routes.upload import router as upload_router
 from api.routes.pdf import router as pdf_router  # type: ignore
 
-app = FastAPI(title="Бабки Скан API")
+app = FastAPI(title="СканУчёт БДА Групп API")
 
 
 @app.on_event("startup")

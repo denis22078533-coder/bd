@@ -65,7 +65,7 @@ export default function EngineSettings() {
     selected_model: "proxyapi-gpt-4o",
     max_tokens: 4096,
     temperature: 0.3,
-    system_prompt: "Ты финансовый ИИ-ассистент для B2B компании. Отвечай профессионально, кратко и по делу. Форматируй суммы в рублях.",
+    system_prompt: "Ты финансовый ИИ-ассистент для компании СканУчёт БДА Групп. Отвечай профессионально, кратко и по делу. Форматируй суммы в рублях.",
     api_key_set: false,
     api_key_masked: "",
     vision_provider: "proxyapi-gpt-4o",

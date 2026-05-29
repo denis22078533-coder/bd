@@ -1,9 +1,7 @@
 """Эндпоинты AI: настройки, чат, распознавание документов."""
-import concurrent.futures
 import json
 import os
 import re
-import traceback
 import urllib.error
 import urllib.request
 from datetime import date
@@ -15,10 +13,6 @@ from api.database.connection import get_cursor, SCHEMA
 from api.utils.formatters import mask_key
 
 router = APIRouter(tags=["ai"])
-
-# ═══════════════════════════════════════════════════════════════════
-#  Конфигурация AI-провайдеров
-# ═══════════════════════════════════════════════════════════════════
 
 DIRECT_ENDPOINTS = {
     "deepseek-chat": "https://api.deepseek.com/v1/chat/completions",
@@ -59,10 +53,6 @@ DEFAULT_SYSTEM = (
     "Используй markdown для выделения важных данных — **жирный** для ключевых цифр."
 )
 
-
-# ═══════════════════════════════════════════════════════════════════
-#  Вспомогательные функции для тестирования AI
-# ═══════════════════════════════════════════════════════════════════
 
 def test_proxyapi(model: str, proxyapi_key: str) -> dict:
     if not proxyapi_key:
@@ -138,8 +128,7 @@ def test_yandex(yandex_key: str, yandex_folder: str) -> dict:
     payload = {"mimeType": "JPEG", "languageCodes": ["ru"], "model": "page", "content": dummy_b64}
     try:
         req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json", "Authorization": f"Api-Key {yandex_key}",
-                     "x-folder-id": yandex_folder, "x-data-logging-enabled": "false"}, method="POST")
+            headers={"Content-Type": "application/json", "Authorization": f"Api-Key {yandex_key}", "x-folder-id": yandex_folder, "x-data-logging-enabled": "false"}, method="POST")
         with urllib.request.urlopen(req, timeout=15) as r:
             return {"ok": True, "status": r.status}
     except urllib.error.HTTPError as e:
@@ -154,10 +143,6 @@ def test_yandex(yandex_key: str, yandex_folder: str) -> dict:
     except Exception as ex:
         return {"ok": False, "error": str(ex)}
 
-
-# ═══════════════════════════════════════════════════════════════════
-#  Функции вызова AI
-# ═══════════════════════════════════════════════════════════════════
 
 def _get_ai_settings(cur):
     cur.execute(f"""
@@ -183,12 +168,8 @@ def _get_ai_settings(cur):
 
 
 def call_deepseek(model, messages, api_key, system_prompt, max_tokens, temperature):
-    payload = {"model": model,
-        "messages": [{"role": "system", "content": system_prompt}] + messages,
-        "max_tokens": max_tokens, "temperature": temperature, "stream": False}
-    req = urllib.request.Request("https://api.deepseek.com/v1/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}, method="POST")
+    payload = {"model": model, "messages": [{"role": "system", "content": system_prompt}] + messages, "max_tokens": max_tokens, "temperature": temperature, "stream": False}
+    req = urllib.request.Request("https://api.deepseek.com/v1/chat/completions", data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}, method="POST")
     with urllib.request.urlopen(req, timeout=30) as r:
         result = json.loads(r.read().decode("utf-8"))
     return result["choices"][0]["message"]["content"]
@@ -201,11 +182,8 @@ def call_gemini(model, messages, api_key, system_prompt, max_tokens, temperature
     for m in messages:
         role = "user" if m.get("role") == "user" else "model"
         contents.append({"role": role, "parts": [{"text": m.get("content", "")}]})
-    payload = {"systemInstruction": {"parts": [{"text": system_prompt}]},
-        "contents": contents,
-        "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens}}
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"}, method="POST")
+    payload = {"systemInstruction": {"parts": [{"text": system_prompt}]}, "contents": contents, "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens}}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=30) as r:
         result = json.loads(r.read().decode("utf-8"))
     return result["candidates"][0]["content"]["parts"][0]["text"]
@@ -216,29 +194,20 @@ def call_yandexgpt(messages, api_key, folder_id, system_prompt, max_tokens, temp
     yandex_messages = [{"role": "system", "text": system_prompt}]
     for m in messages:
         yandex_messages.append({"role": m.get("role", "user"), "text": m.get("content", "")})
-    payload = {"modelUri": f"gpt://{folder_id}/yandexgpt/latest",
-        "completionOptions": {"stream": False, "temperature": temperature, "maxTokens": max_tokens},
-        "messages": yandex_messages}
-    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Api-Key {api_key}",
-                 "x-folder-id": folder_id}, method="POST")
+    payload = {"modelUri": f"gpt://{folder_id}/yandexgpt/latest", "completionOptions": {"stream": False, "temperature": temperature, "maxTokens": max_tokens}, "messages": yandex_messages}
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json", "Authorization": f"Api-Key {api_key}", "x-folder-id": folder_id}, method="POST")
     with urllib.request.urlopen(req, timeout=30) as r:
         result = json.loads(r.read().decode("utf-8"))
     return result["result"]["alternatives"][0]["message"]["text"]
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  AI Settings Endpoints
-# ═══════════════════════════════════════════════════════════════════
+# ── AI Settings ─────────────────────────────────────────────────
 
 @router.get("/api/ai-settings")
 async def ai_settings_get(action: Optional[str] = Query(None)):
     with get_cursor() as cur:
         if action == "test":
-            cur.execute(f"""
-                SELECT selected_model, api_key, gemini_api_key, yandex_api_key, yandex_folder_id,
-                       proxyapi_key, vision_provider FROM {SCHEMA}.ai_settings WHERE id = 1
-            """)
+            cur.execute(f"SELECT selected_model, api_key, gemini_api_key, yandex_api_key, yandex_folder_id, proxyapi_key, vision_provider FROM {SCHEMA}.ai_settings WHERE id = 1")
             row = cur.fetchone()
             if not row:
                 raise HTTPException(404, "Настройки не найдены")
@@ -249,14 +218,12 @@ async def ai_settings_get(action: Optional[str] = Query(None)):
             yandex_folder = row[4] or os.environ.get("YANDEX_FOLDER_ID", "")
             proxyapi_key = row[5] or os.environ.get("PROXYAPI_KEY", "")
             vision_provider = row[6] or "proxyapi-gpt-4o"
-
             if model.startswith("proxyapi-"):
                 ai_result = test_proxyapi(model, proxyapi_key)
             elif model.startswith("gemini"):
                 ai_result = test_direct(model, gemini_key)
             else:
                 ai_result = test_direct(model, deepseek_key)
-
             if vision_provider.startswith("proxyapi-"):
                 vision_result = test_proxyapi(vision_provider, proxyapi_key)
             elif vision_provider == "yandex":
@@ -265,46 +232,18 @@ async def ai_settings_get(action: Optional[str] = Query(None)):
                 vision_result = test_direct("gemini-pro", gemini_key) if gemini_key else {"ok": None, "error": "Ключ Gemini не задан"}
             else:
                 vision_result = {"ok": None, "error": "Vision-провайдер не выбран"}
-
             overall_ok = bool(ai_result.get("ok")) and bool(vision_result.get("ok"))
-            return {
-                "ok": overall_ok, "ai_model": model, "ai": ai_result,
-                "vision_provider": vision_provider, "vision": vision_result,
-                "yandex": vision_result,
-                "error": None if overall_ok else (vision_result.get("error") or ai_result.get("error")),
-            }
-
-        cur.execute(f"""
-            SELECT selected_model, max_tokens, temperature, system_prompt, api_key, updated_at,
-                   gemini_api_key, yandex_api_key, yandex_folder_id, proxyapi_key, vision_provider
-            FROM {SCHEMA}.ai_settings WHERE id = 1
-        """)
+            return {"ok": overall_ok, "ai_model": model, "ai": ai_result, "vision_provider": vision_provider, "vision": vision_result, "yandex": vision_result, "error": None if overall_ok else (vision_result.get("error") or ai_result.get("error"))}
+        cur.execute(f"SELECT selected_model, max_tokens, temperature, system_prompt, api_key, updated_at, gemini_api_key, yandex_api_key, yandex_folder_id, proxyapi_key, vision_provider FROM {SCHEMA}.ai_settings WHERE id = 1")
         row = cur.fetchone()
         if not row:
             raise HTTPException(404, "Settings not found")
-
         gemini_key = row[6] or os.environ.get("GEMINI_API_KEY", "")
         yandex_key = row[7] or os.environ.get("YANDEX_API_KEY", "")
         yandex_folder = row[8] or os.environ.get("YANDEX_FOLDER_ID", "")
         proxyapi_key = row[9] or os.environ.get("PROXYAPI_KEY", "")
         vision_provider = row[10] or "proxyapi-gpt-4o"
-
-        return {"settings": {
-            "selected_model": row[0], "max_tokens": row[1], "temperature": float(row[2]),
-            "system_prompt": row[3],
-            "api_key_set": bool(row[4] or os.environ.get("DEEPSEEK_API_KEY")),
-            "api_key_masked": mask_key(row[4] or os.environ.get("DEEPSEEK_API_KEY", "")),
-            "gemini_key_set": bool(gemini_key),
-            "gemini_key_masked": mask_key(gemini_key),
-            "yandex_key_set": bool(yandex_key),
-            "yandex_key_masked": mask_key(yandex_key),
-            "yandex_folder_set": bool(yandex_folder),
-            "yandex_folder_masked": mask_key(yandex_folder),
-            "proxyapi_key_set": bool(proxyapi_key),
-            "proxyapi_key_masked": mask_key(proxyapi_key),
-            "vision_provider": vision_provider,
-            "updated_at": str(row[5]),
-        }}
+        return {"settings": {"selected_model": row[0], "max_tokens": row[1], "temperature": float(row[2]), "system_prompt": row[3], "api_key_set": bool(row[4] or os.environ.get("DEEPSEEK_API_KEY")), "api_key_masked": mask_key(row[4] or os.environ.get("DEEPSEEK_API_KEY", "")), "gemini_key_set": bool(gemini_key), "gemini_key_masked": mask_key(gemini_key), "yandex_key_set": bool(yandex_key), "yandex_key_masked": mask_key(yandex_key), "yandex_folder_set": bool(yandex_folder), "yandex_folder_masked": mask_key(yandex_folder), "proxyapi_key_set": bool(proxyapi_key), "proxyapi_key_masked": mask_key(proxyapi_key), "vision_provider": vision_provider, "updated_at": str(row[5])}}
 
 
 @router.put("/api/ai-settings")
@@ -330,71 +269,43 @@ async def ai_settings_update(data: dict):
             raise HTTPException(400, "No fields")
         fields.append("updated_at = NOW()")
         params.append(1)
-        cur.execute(f"""
-            UPDATE {SCHEMA}.ai_settings SET {', '.join(fields)} WHERE id = %s
-            RETURNING selected_model, max_tokens, temperature, system_prompt, api_key,
-                       gemini_api_key, yandex_api_key, yandex_folder_id, proxyapi_key, vision_provider
-        """, params)
+        cur.execute(f"UPDATE {SCHEMA}.ai_settings SET {', '.join(fields)} WHERE id = %s RETURNING selected_model, max_tokens, temperature, system_prompt, api_key, gemini_api_key, yandex_api_key, yandex_folder_id, proxyapi_key, vision_provider", params)
         row = cur.fetchone()
         gemini_key = row[5] or ""
         yandex_key = row[6] or os.environ.get("YANDEX_API_KEY", "")
         yandex_folder = row[7] or os.environ.get("YANDEX_FOLDER_ID", "")
         proxyapi_key = row[8] or ""
         vision_provider = row[9] or "proxyapi-gpt-4o"
-        return {"settings": {
-            "selected_model": row[0], "max_tokens": row[1], "temperature": float(row[2]),
-            "system_prompt": row[3],
-            "api_key_set": bool(row[4] or os.environ.get("DEEPSEEK_API_KEY")),
-            "api_key_masked": mask_key(row[4] or os.environ.get("DEEPSEEK_API_KEY", "")),
-            "gemini_key_set": bool(gemini_key),
-            "gemini_key_masked": mask_key(gemini_key),
-            "yandex_key_set": bool(yandex_key),
-            "yandex_key_masked": mask_key(yandex_key),
-            "yandex_folder_set": bool(yandex_folder),
-            "yandex_folder_masked": mask_key(yandex_folder),
-            "proxyapi_key_set": bool(proxyapi_key),
-            "proxyapi_key_masked": mask_key(proxyapi_key),
-            "vision_provider": vision_provider,
-        }}
+        return {"settings": {"selected_model": row[0], "max_tokens": row[1], "temperature": float(row[2]), "system_prompt": row[3], "api_key_set": bool(row[4] or os.environ.get("DEEPSEEK_API_KEY")), "api_key_masked": mask_key(row[4] or os.environ.get("DEEPSEEK_API_KEY", "")), "gemini_key_set": bool(gemini_key), "gemini_key_masked": mask_key(gemini_key), "yandex_key_set": bool(yandex_key), "yandex_key_masked": mask_key(yandex_key), "yandex_folder_set": bool(yandex_folder), "yandex_folder_masked": mask_key(yandex_folder), "proxyapi_key_set": bool(proxyapi_key), "proxyapi_key_masked": mask_key(proxyapi_key), "vision_provider": vision_provider}}
 
 
-# ═══════════════════════════════════════════════════════════════════
-#  AI Chat Endpoint
-# ═══════════════════════════════════════════════════════════════════
+# ── AI Chat ─────────────────────────────────────────────────────
 
 @router.post("/api/ai-chat")
 async def ai_chat(data: dict):
     messages = data.get("messages", [])
     requested_model = data.get("model")
-
     with get_cursor() as cur:
         settings = _get_ai_settings(cur)
-
     if not settings:
-        raise HTTPException(500, "Настройки ИИ не найдены. Откройте раздел Настройки.")
-
+        raise HTTPException(500, "Настройки ИИ не найдены.")
     model = requested_model or settings["selected_model"]
     system_prompt = settings["system_prompt"] or DEFAULT_SYSTEM
     max_tokens = settings["max_tokens"]
     temperature = settings["temperature"]
-
     try:
         if model.startswith("deepseek"):
             if not settings["deepseek_key"]:
                 raise HTTPException(400, "Ключ DeepSeek не задан.")
-            reply = call_deepseek(model, messages, settings["deepseek_key"],
-                                  system_prompt, max_tokens, temperature)
+            reply = call_deepseek(model, messages, settings["deepseek_key"], system_prompt, max_tokens, temperature)
         elif model.startswith("gemini"):
             if not settings["gemini_key"]:
                 raise HTTPException(400, "Ключ Gemini не задан.")
-            reply = call_gemini(model, messages, settings["gemini_key"],
-                                system_prompt, max_tokens, temperature)
+            reply = call_gemini(model, messages, settings["gemini_key"], system_prompt, max_tokens, temperature)
         elif model.startswith("yandex"):
             if not settings["yandex_key"] or not settings["yandex_folder"]:
                 raise HTTPException(400, "Не задан ключ или Folder ID Яндекс.")
-            reply = call_yandexgpt(messages, settings["yandex_key"],
-                                    settings["yandex_folder"],
-                                    system_prompt, max_tokens, temperature)
+            reply = call_yandexgpt(messages, settings["yandex_key"], settings["yandex_folder"], system_prompt, max_tokens, temperature)
         else:
             raise HTTPException(400, f"Модель {model} не поддерживается")
         return {"reply": reply, "model": model}
@@ -403,3 +314,56 @@ async def ai_chat(data: dict):
         raise HTTPException(e.code, {"error": f"API ошибка {e.code}", "detail": err_body[:500]})
     except Exception as e:
         raise HTTPException(500, str(e))
+
+
+# ── Recognize Document ──────────────────────────────────────────
+
+def _apply_category_rules(ocr_text: str = "") -> str:
+    t = (ocr_text or "").lower()
+    if any(x in t for x in ("азс", "бензин", "дизель", "топливо", "гсм")): return "ГСМ"
+    if any(x in t for x in ("накладная", "торг-12", "тмц", "номенклатура")): return "Закупка товара"
+    if any(x in t for x in ("аренда", "арендодател")): return "Аренда"
+    if any(x in t for x in ("бухгалтерск", "юридическ", "консультац")): return "Бухгалтерские услуги"
+    if any(x in t for x in ("реклам", "маркетинг", "продвижени")): return "Маркетинг"
+    if any(x in t for x in ("доставк", "транспорт", "логистик")): return "Логистика"
+    if any(x in t for x in ("зарплат", "заработн", "оклад")): return "Зарплаты"
+    if any(x in t for x in ("связь", "интернет", "телефон")): return "Связь"
+    if any(x in t for x in ("электроэнерг", "коммунальн", "жкх")): return "Коммунальные услуги"
+    if any(x in t for x in ("продукт", "еда", "питание")): return "Продукты"
+    return "Прочее"
+
+
+def _find_amount(text: str):
+    if not text:
+        return None
+    for pat in [r"итого[:\s]+([\d\s]+[.,]\d{2})", r"всего[:\s]+([\d\s]+[.,]\d{2})", r"сумма[:\s]+([\d\s]+[.,]\d{2})", r"к\s*оплате[:\s]+([\d\s]+[.,]\d{2})"]:
+        m = re.search(pat, text.lower())
+        if m:
+            try:
+                return float(m.group(1).replace(" ", "").replace(",", "."))
+            except ValueError:
+                pass
+    return None
+
+
+@router.post("/api/recognize-doc")
+async def recognize_doc(data: dict):
+    ocr_text = data.get("ocr_text", "")
+    doc_id = data.get("doc_id")
+    auto_create_tx = data.get("auto_create_tx", False)
+    amount = _find_amount(ocr_text)
+    category = _apply_category_rules(ocr_text)
+    tx_id = None
+    if doc_id and amount:
+        with get_cursor() as cur:
+            try:
+                cur.execute(f"UPDATE {SCHEMA}.documents SET status='done', rec_type=%s, rec_amount=%s, rec_category=%s WHERE id=%s RETURNING id", ("", str(amount), category, doc_id))
+                if cur.fetchone() and auto_create_tx:
+                    tx_amount = -abs(float(amount))
+                    cur.execute(f"INSERT INTO {SCHEMA}.transactions (date, description, category, amount, status, is_taxable, is_cashless, document_id) VALUES (%s, %s, %s, %s, 'Выполнено', true, false, %s) RETURNING id", (str(date.today()), f"Документ №{doc_id}", category, tx_amount, doc_id))
+                    tx_row = cur.fetchone()
+                    if tx_row:
+                        tx_id = tx_row[0]
+            except Exception:
+                pass
+    return {"amount": amount, "category": category, "date": str(date.today()), "doc_type": "", "counterparty": "", "inn": None, "comment": "", "fallback": True, "transaction_id": tx_id}

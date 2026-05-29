@@ -135,7 +135,7 @@ export default function DocDetail({
             <div className="mb-3">
               <div className="rounded-lg overflow-hidden border border-border bg-secondary/30">
                 <img
-                  src={selected.previewUrl || proxyImg(selected.s3_url)}
+src={selected.previewUrl || selected.s3_url || ''}
                   alt="Документ"
                   className="w-full max-h-52 object-contain"
                 />
